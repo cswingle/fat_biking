@@ -1,0 +1,202 @@
+---
+title: "Temperature effects on fat biking"
+author: "Christopher Swingley"
+date: '2015-12-19'
+output:
+  pdf_document:
+    highlight: default
+    includes:
+      in_header: rmarkdown_tex_preamble.tex
+    keep_tex: yes
+    latex_engine: xelatex
+    toc: no
+  html_document:
+    theme: united
+    toc: yes
+  word_document: default
+---
+
+# Introduction
+
+I’ve had a fat bike since late November 2013, mostly using it to commute the 4.1
+miles to and from work on the Goldstream Valley trail system.  I used to classic
+ski exclusively, but that’s not particularly pleasant once the temperatures are
+below 0°F because I can’t keep my hands and feet warm enough, and the amount of
+glide you get on skis declines as the temperature goes down.
+
+However, it’s also true that fat biking gets much harder the colder it gets.  I
+think this is partly due to biking while wearing lots of extra layers, but also
+because of increased friction between the large tires and tubes in a fat bike.
+In this post I will look at how temperature and other variables affect the
+performance of a fat bike (and it’s rider).
+
+The code and data for this post is available on
+[GitHub](https://github.com/cswingle/fat_biking).
+
+# Data
+
+I log all my commutes (and other exercise) using the
+[RunKeeper](http://runkeeper.com) app, which uses the phone’s GPS to keep track
+of distance and speed, and connects to my heart rate monitor to track heart
+rate.  I had been using a Polar HR chest strap, but after about a year it became
+flaky and I replaced it with a Scosche Rhythm+ arm band monitor.  The data from
+RunKeeper is exported into GPX files, which I process and insert into a
+PostgreSQL database.
+
+From the heart rate data, I estimate energy consumption (in kilocalories, or
+what appears on food labels as calories) using a formula from Keytel LR, et al.
+2005, which I talk about in this [blog
+post](http://swingleydev.com/blog/p/1970/).
+
+Let’s take a look at the data:
+
+```{r echo=TRUE, eval=TRUE, warning=FALSE}
+library(dplyr)
+library(ggplot2)
+library(scales)
+library(lubridate)
+library(munsell)
+
+fat_bike <- read.csv("fat_bike.csv", stringsAsFactors=FALSE, header=TRUE) %>%
+    tbl_df() %>%
+    mutate(start_time=ymd_hms(start_time, tz="US/Alaska"))
+
+kable(head(fat_bike))
+```
+
+There are a few things we need to do to the raw data before analyzing it.
+First, we want to restrict the data to just my commutes to and from work, and we
+want to categorize them as being one or the other.  That way we can analyze
+trips to ABR and home separately, and we’ll reduce the variation within each
+analysis.  If we were to analyze all fat biking trips together, we’d be lumping
+short and long trips, as well as those with a different proportion of hills or
+more challenging conditions.  To get just trips to and from work, I’m
+restricting the distance to trips between 4.0 and 4.3 miles, and only those
+activities where there were two of them in a single day (to work and home from
+work).  To categorize them into commutes to work and home, I filter based on the
+time of day.
+
+I’m also calculating energy per mile, and adding a “winter day of year” variable
+(``wdoy``), which is a measure of how far into the winter season the trip took
+place.  We can't just use day of year because that starts over on January 1st,
+so we subtract the number of days between January and May from the date and get
+day of year from that.  Finally, we split the data into trips to work and home.
+
+I'm also excluding the really early season data from 2015 because the trail was
+in really poor condition.
+
+```{r echo=TRUE, eval=TRUE, warning=FALSE}
+fat_bike_commute <- fat_bike %>%
+    filter(miles>4, miles<4.3) %>%
+    mutate(direction=ifelse(hour(start_time)<10, 'north', 'south'),
+           date=as.Date(start_time, tz='US/Alaska'),
+           wdoy=yday(date-days(120)),
+           kcal_per_mile=kcal/miles) %>%
+    group_by(date) %>%
+    mutate(n=n()) %>%
+    ungroup() %>%
+    filter(n>1)
+
+to_abr <- fat_bike_commute %>% filter(direction=='north',
+                                      wdoy>210)
+to_home <- fat_bike_commute %>% filter(direction=='south',
+                                       wdoy>210)
+kable(head(to_home %>% select(-date, -kcal, -n)))
+```
+
+# Analysis
+
+Here a plot of the data.  We’re plotting all trips with winter day of year on
+the x-axis and energy per mile on the y-axis.  The color of the points indicates
+the minimum temperature and the straight line shows the trend of the
+relationship.
+
+```{r echo=TRUE, eval=TRUE, warning=FALSE}
+s <- ggplot(data=fat_bike_commute %>% filter(wdoy>210), aes(x=wdoy, y=kcal_per_mile, colour=min_temp)) +
+    geom_smooth(method="lm", se=FALSE, colour=mnsl("10B 7/10", fix=TRUE)) +
+    geom_point(size=3) +
+    scale_x_continuous(name=NULL,
+                       breaks=c(215, 246, 277, 305, 336),
+                       labels=c('1-Dec', '1-Jan', '1-Feb', '1-Mar', '1-Apr')) +
+    scale_y_continuous(name="Energy (kcal)", breaks=pretty_breaks(n=10)) +
+    scale_colour_continuous(low=mnsl("7.5B 5/12", fix=TRUE), high=mnsl("7.5R 5/12", fix=TRUE),
+                            breaks=pretty_breaks(n=5),
+                            guide=guide_colourbar(title="Min temp (°F)", reverse=FALSE, barheight=8)) +
+    ggtitle("All fat bike trips") +
+    theme_bw()
+print(s)
+```
+
+Across all trips, we can see that as the winter progresses, I consume less
+energy per mile.  This is hopefully because my physical condition improves the
+more I ride, and also because the trail conditions also improve as the snow pack
+develops and the trail gets harder with use.  You can also see a pattern in the
+color of the dots, with the bluer (and colder) points near the top and the
+warmer temperature trips near the bottom.
+
+Let’s look at the temperature relationship:
+
+```{r echo=TRUE, eval=TRUE, warning=FALSE}
+s <- ggplot(data=fat_bike_commute %>% filter(wdoy>210), aes(x=min_temp, y=kcal_per_mile, colour=wdoy)) +
+    geom_smooth(method="lm", se=FALSE, colour=mnsl("10B 7/10", fix=TRUE)) +
+    geom_point(size=3) +
+    scale_x_continuous(name="Minimum temperature (degrees F)", breaks=pretty_breaks(n=10)) +
+    scale_y_continuous(name="Energy (kcal)", breaks=pretty_breaks(n=10)) +
+    scale_colour_continuous(low=mnsl("7.5PB 2/12", fix=TRUE), high=mnsl("7.5PB 8/12", fix=TRUE),
+                            breaks=c(215, 246, 277, 305, 336),
+                            labels=c('1-Dec', '1-Jan', '1-Feb', '1-Mar', '1-Apr'),
+                            guide=guide_colourbar(title=NULL, reverse=TRUE, barheight=8)) +
+    ggtitle("All fat bike trips") +
+    theme_bw()
+print(s)
+```
+
+A similar pattern.  As the temperature drops, it takes more energy to go the
+same distance.  And the color of the points also shows the relationship from the
+earlier plot where trips taken later in the season require less energy.
+
+There is also be a correlation between winter day of year and temperature.
+Since the winter fat biking season essentially begins in December, it tends to
+warm up throughout.
+
+# Results
+
+The relationship between winter day of year and temperature means that we’ve got
+multicollinearity in any model that includes both of them.  This doesn’t mean we
+shouldn’t include them, nor that the significance or predictive power of the
+model is reduced.  All it means is that we can’t use the individual regression
+coefficients to make predictions.
+
+Here are the linear models for trips to work, and home:
+
+```{r echo=TRUE, eval=TRUE, warning=FALSE}
+to_abr_lm <- lm(data=to_abr, kcal_per_mile ~ min_temp + wdoy)
+print(summary(to_abr_lm))
+
+to_home_lm <- lm(data=to_home, kcal_per_mile ~ min_temp + wdoy)
+print(summary(to_home_lm))
+```
+
+The models confirm what we saw in the plots.  Both regression coefficients are
+negative, which means that as the temperature rises (and as the winter goes on)
+I consume less energy per mile.  The models themselves are significant as are
+the coefficients, although less so in the trips to work.  The amount of
+variation in kcal/mile explained by minimum temperature and winter day of year
+is 41% for trips to work and 56% for trips home.
+
+What accounts for the rest of the variation?  My guess is that trail conditions
+are the missing factor here; specifically fresh snow, or a trail churned up by
+snowmachiners.  I think that's also why the results are better on trips home
+than to work. On days when we get snow overnight, I am almost certainly riding
+on an pristine snow-covered trail, but by the time I leave work, the trail will
+be smoother and harder due to all the traffic it's seen over the course of the
+day.
+
+# Conclusions
+
+We didn’t really find anything surprising here: it is significantly harder to
+ride a fat bike when it’s colder.  Because of conditioning, improved trail
+conditions,  as well as the tendency for warmer weather later in the season, it
+also gets easier to ride as the winter goes on.
+
+<!-- vim: set ft=rmd fenc=utf-8 tw=80 ts=4 sw=4 sts=4 :-->
