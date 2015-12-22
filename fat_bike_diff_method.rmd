@@ -1,0 +1,163 @@
+---
+title: "Temperature effects on fat biking, part two"
+author: "Christopher Swingley"
+date: '2015-12-21'
+output:
+  pdf_document:
+    highlight: default
+    includes:
+      in_header: rmarkdown_tex_preamble.tex
+    keep_tex: yes
+    latex_engine: xelatex
+    toc: no
+  html_document:
+    theme: united
+    toc: yes
+  word_document: default
+---
+
+# Introduction
+
+While riding to work this morning I figured out a way to disentangle the effects
+of trail quality and physical conditioning (both of which improve over the
+season) from temperature, which also tends to increase throughout the season.
+As you recall in my previous post, I found that days into the season (winter day
+of year) and minimum temperature were both negatively related with fat bike
+energy consumption.  But because those variables are related, we can’t make
+statements about them individually.
+
+But what if we look at pairs of trips that are within two days of each other and
+look at the difference in temperature between those trips and the difference in
+energy consumption?  We’ll only pair trips going the same direction (to or from
+work), and we’ll restrict the pairings to two days or less.  That eliminates
+seasonality from the data because we’re always comparing two trips from the same
+few days.
+
+# Data
+
+For this analysis, I’m using SQL to filter the data because I’m better at window
+functions and filtering in SQL than R.  Here’s the code to grab the data from
+the database.  (The CSV is on my [GitHub
+repo](https://github.com/cswingle/fat_biking) for this analysis).  The trick
+here is to categorize trips as being to work (“north”) or from work (“south”)
+and then include this field in the partition statement of the window function so
+I’m only getting the next trip that matches direction.
+
+```{r echo=TRUE, eval=FALSE, warning=FALSE}
+library(dplyr)
+library(ggplot2)
+library(scales)
+
+exercise_db <- src_postgres(host="example.com", dbname="exercise_data")
+
+diffs <- tbl(exercise_db,
+             build_sql(
+   "WITH all_to_work AS (
+        SELECT *,
+            CASE WHEN extract(hour from start_time) < 11 THEN 'north' ELSE 'south' END AS direction
+        FROM track_stats
+        WHERE type = 'Fat Biking'
+            AND miles between 4 and 4.3
+    ), with_next AS (
+        SELECT track_id, start_time, direction, kcal, miles, min_temp,
+            lead(direction) OVER w AS next_direction,
+            lead(start_time) OVER w AS next_start_time,
+            lead(kcal) OVER w AS next_kcal,
+            lead(miles) OVER w AS next_miles,
+            lead(min_temp) OVER w AS next_min_temp
+        FROM all_to_work
+        WINDOW w AS (PARTITION BY direction ORDER BY start_time)
+    )
+    SELECT start_time, next_start_time, direction,
+        min_temp, next_min_temp,
+        kcal / miles AS kcal_per_mile,
+        next_kcal / next_miles as next_kcal_per_mile,
+        next_min_temp - min_temp AS temp_diff,
+        (next_kcal / next_miles) - (kcal / miles) AS kcal_per_mile_diff
+    FROM with_next
+    WHERE next_start_time - start_time < '60 hours'
+    ORDER BY start_time")) %>% collect()
+
+write.csv(diffs, file="fat_biking_trip_diffs.csv", quote=TRUE,
+          row.names=FALSE)
+kable(head(diffs))
+```
+
+```{r echo=FALSE, eval=TRUE, warning=FALSE}
+library(dplyr)
+library(ggplot2)
+library(scales)
+diffs <- read.csv("fat_biking_trip_diffs.csv", header=TRUE,
+                  stringsAsFactors=FALSE)
+kable(head(diffs))
+```
+
+Out of a total of 123 trips, 70 took place within 2 days of each other.  We
+still don’t have a measure of trail quality, so pairs where the trail is smooth
+and hard one day and covered with fresh snow the next won’t be particularly good
+data points.
+
+Let’s look at a plot of the data.
+
+```{r echo=TRUE, eval=TRUE, warning=FALSE}
+s = ggplot(data=diffs,
+           aes(x=temp_diff, y=kcal_per_mile_diff)) +
+    geom_point() +
+    geom_smooth(method="lm", se=FALSE) +
+    scale_x_continuous(name="Temperature difference between paired trips (degrees F)",
+                       breaks=pretty_breaks(n=10)) +
+    scale_y_continuous(name="Energy consumption difference (kcal / mile)",
+                       breaks=pretty_breaks(n=10)) +
+    theme_bw() +
+    ggtitle("Paired fat bike trips to and from work within 2 days of each other")
+
+print(s)
+```
+
+What this shows is that when the temperature difference between two paired trips
+is negative (the second trip is colder than the first), additional energy is
+required for the second (colder) trip.  This matches the pattern we saw in my
+last post where minimum temperature and winter day of year were negatively
+associated with energy consumption.  But because we’ve used differences to
+remove seasonal effects, we can actually determine how large of an effect
+temperature has.
+
+There are quite a few outliers here.  Those that are in the region with very
+little difference in temperature are likey due to snowfall changing the trail
+conditions from one trip to the next.
+
+I’m not sure why there is so much scatter among the points on the left side of
+the graph.  I don’t see any particular pattern among those points that might
+explain the higher than normal variation (see the table below), and we don’t see
+the same variation in the points with a large positive difference in
+temperature, so I think this is normal variation in the data not explained by
+temperature.
+
+```{r echo=TRUE, eval=TRUE, warning=FALSE}
+diffs %>% filter(temp_diff < -20) %>% kable()
+```
+
+# Results
+
+Here’s the linear regression results for this data.
+
+```{r echo=TRUE, eval=TRUE, warning=FALSE}
+summary(lm(data=diffs, kcal_per_mile_diff ~ temp_diff))
+```
+
+The model and coefficient are both highly signficant, and as we might expect,
+the intercept in the model is not significantly different from zero (if there
+wasn’t a difference in temperature between two trips there shouldn’t be a
+difference in energy consumption either, on average).  Temperature alone
+explains 30% of the variation in energy consumption, and the coefficient tells
+us the scale of the effect: each degree drop in temperature results in an
+increase in energy consumption of 0.78 kcalories per mile.  So for a 4 mile
+commute like mine, the difference between a trip at 10°F vs −20°F is an
+additional 93 kilocalories (30 × 0.7778 × 4 = 93.34) on the colder trip.  That
+might not sound like much in the context of the calories in food (93
+kilocalories is about the energy in a large orange or a light beer), but my
+average energy consumption across all fat bike trips to and from work is 377
+kcalories so 93 represents a large portion of the total.
+
+
+<!-- vim: set ft=rmd fenc=utf-8 tw=80 ts=4 sw=4 sts=4 :-->
